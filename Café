@@ -1,0 +1,595 @@
+// Compile: g++ cafe_system.cpp -o cafe_system
+
+#include <iostream>
+#include <string>
+#include <stdexcept>
+#include <cctype>
+#include <cstdio>
+
+using namespace std;
+
+
+static string trim(const string& s) {
+    size_t a = 0, b = s.size();
+    while (a < b && isspace((unsigned char)s[a])) a++;
+    while (b > a && isspace((unsigned char)s[b - 1])) b--;
+    return s.substr(a, b - a);
+}
+
+static string toLower(string s) {
+    for (char& c : s) c = (char)tolower((unsigned char)c);
+    return s;
+}
+
+static string toUpper(string s) {
+    for (char& c : s) c = (char)toupper((unsigned char)c);
+    return s;
+}
+
+static bool equalsIgnoreCase(const string& a, const string& b) {
+    return toLower(a) == toLower(b);
+}
+
+enum class NodeKind { CAFE, ZONE, TABLE };
+
+struct TreeNode {
+    string name;
+    NodeKind kind;
+    int seats;               
+    bool occupied;           
+    string customer;         
+    TreeNode* parent;
+    TreeNode* firstChild;    
+    TreeNode* nextSibling;   
+
+    TreeNode(const string& n, NodeKind k, int s = 0)
+        : name(n), kind(k), seats(s), occupied(false), customer(""),
+          parent(nullptr), firstChild(nullptr), nextSibling(nullptr) {}
+
+    void addChild(TreeNode* child) {
+        child->parent = this;
+        child->nextSibling = nullptr;
+        if (!firstChild) { firstChild = child; return; }
+        TreeNode* cur = firstChild;
+        while (cur->nextSibling) cur = cur->nextSibling;
+        cur->nextSibling = child;
+    }
+
+    bool removeChild(TreeNode* child) {
+        TreeNode* prev = nullptr;
+        TreeNode* cur = firstChild;
+        while (cur) {
+            if (cur == child) {
+                if (!prev) firstChild = cur->nextSibling;
+                else prev->nextSibling = cur->nextSibling;
+                cur->parent = nullptr;
+                cur->nextSibling = nullptr;
+                return true;
+            }
+            prev = cur;
+            cur = cur->nextSibling;
+        }
+        return false;
+    }
+
+    string label() const {
+        if (kind == NodeKind::TABLE) {
+            string s = "Table " + name + " [" + to_string(seats) + " seats, " +
+                       (occupied ? "occupied" : "available") + "]";
+            if (!customer.empty()) s += " (customer " + customer + ")";
+            return s;
+        }
+        if (kind == NodeKind::ZONE) return "Zone " + name;
+        return "Cafe " + name;
+    }
+};
+
+static void freeSubtree(TreeNode* node) {
+    if (!node) return;
+    TreeNode* child = node->firstChild;
+    while (child) {
+        TreeNode* next = child->nextSibling;
+        freeSubtree(child);
+        child = next;
+    }
+    delete node;
+}
+
+struct StackNode {
+    TreeNode* data;
+    StackNode* next;
+};
+
+class NodeStack {
+    StackNode* top = nullptr;
+public:
+    ~NodeStack() { while (!isEmpty()) pop(); }
+    void push(TreeNode* x) { top = new StackNode{x, top}; }
+    TreeNode* pop() {
+        StackNode* n = top;
+        TreeNode* d = n->data;
+        top = n->next;
+        delete n;
+        return d;
+    }
+    bool isEmpty() const { return top == nullptr; }
+};
+
+struct ResultNode {
+    TreeNode* data;
+    ResultNode* next;
+};
+
+class ResultList {
+public:
+    ResultNode* head = nullptr;
+    ResultNode* tail = nullptr;
+    int size = 0;
+    ResultList() = default;
+    ResultList(const ResultList&) = delete;
+    ResultList& operator=(const ResultList&) = delete;
+    ResultList(ResultList&& o) noexcept : head(o.head), tail(o.tail), size(o.size) {
+        o.head = o.tail = nullptr; o.size = 0;
+    }
+    ~ResultList() {
+        while (head) { ResultNode* n = head->next; delete head; head = n; }
+    }
+    void append(TreeNode* x) {
+        ResultNode* n = new ResultNode{x, nullptr};
+        if (!head) head = tail = n;
+        else { tail->next = n; tail = n; }
+        size++;
+    }
+};
+
+class CafeTree {
+    TreeNode* root = nullptr;
+
+    void requireRoot() const {
+        if (!root) throw runtime_error("Tree has not been created yet. Please create it first.");
+    }
+
+    template <typename F>
+    void dfs(TreeNode* start, F visit) const {
+        NodeStack stack;
+        if (start) stack.push(start);
+        while (!stack.isEmpty()) {
+            TreeNode* cur = stack.pop();
+            visit(cur);
+            NodeStack rev;
+            for (TreeNode* c = cur->firstChild; c; c = c->nextSibling) rev.push(c);
+            while (!rev.isEmpty()) stack.push(rev.pop());
+        }
+    }
+
+    void renderRec(TreeNode* node, const string& prefix) const {
+        for (TreeNode* cur = node->firstChild; cur; cur = cur->nextSibling) {
+            bool last = (cur->nextSibling == nullptr);
+            cout << prefix << (last ? "`-- " : "|-- ") << cur->label() << "\n";
+            renderRec(cur, prefix + (last ? "    " : "|   "));
+        }
+    }
+
+public:
+    CafeTree() = default;
+    CafeTree(const CafeTree&) = delete;
+    CafeTree& operator=(const CafeTree&) = delete;
+    ~CafeTree() { freeSubtree(root); }
+
+    TreeNode* getRoot() const { return root; }
+
+    void create(const string& cafeName) {
+        freeSubtree(root);
+        root = new TreeNode(cafeName, NodeKind::CAFE);
+        root->addChild(new TreeNode("Indoor", NodeKind::ZONE));
+        root->addChild(new TreeNode("Outdoor", NodeKind::ZONE));
+    }
+
+    TreeNode* find(const string& name, int kindFilter = -1) const {
+        requireRoot();
+        string key = trim(name);
+        TreeNode* found = nullptr;
+        dfs(root, [&](TreeNode* n) {
+            if (!found && equalsIgnoreCase(n->name, key) &&
+                (kindFilter == -1 || (int)n->kind == kindFilter))
+                found = n;
+        });
+        return found;
+    }
+
+    ResultList searchAvailable(int minSeats, const string& zone = "") const {
+        requireRoot();
+        TreeNode* start = root;
+        if (!zone.empty()) {
+            start = find(zone, (int)NodeKind::ZONE);
+            if (!start) throw runtime_error("Zone '" + zone + "' not found.");
+        }
+        ResultList result;
+        dfs(start, [&](TreeNode* n) {
+            if (n->kind == NodeKind::TABLE && !n->occupied && n->seats >= minSeats)
+                result.append(n);
+        });
+        return result;
+    }
+
+    TreeNode* bestTableFor(int partySize) const {
+        ResultList list = searchAvailable(partySize);
+        TreeNode* best = nullptr;
+        for (ResultNode* r = list.head; r; r = r->next)
+            if (!best || r->data->seats < best->seats) best = r->data;
+        return best;
+    }
+
+    TreeNode* insertZone(const string& zoneName) {
+        requireRoot();
+        string z = trim(zoneName);
+        if (z.empty()) throw runtime_error("Zone name must not be empty.");
+        if (find(z, (int)NodeKind::ZONE)) throw runtime_error("Zone '" + z + "' already exists.");
+        TreeNode* node = new TreeNode(z, NodeKind::ZONE);
+        root->addChild(node);
+        return node;
+    }
+
+    TreeNode* insertTable(const string& zoneName, const string& tableId, int seats) {
+        requireRoot();
+        TreeNode* zone = find(zoneName, (int)NodeKind::ZONE);
+        if (!zone) throw runtime_error("Zone '" + trim(zoneName) + "' not found.");
+        string id = trim(tableId);
+        if (id.empty()) throw runtime_error("Table id must not be empty.");
+        if (find(id, (int)NodeKind::TABLE)) throw runtime_error("Table '" + id + "' already exists.");
+        if (seats <= 0) throw runtime_error("Seats must be greater than 0.");
+        TreeNode* node = new TreeNode(id, NodeKind::TABLE, seats);
+        zone->addChild(node);
+        return node;
+    }
+
+
+    string deleteZone(const string& zoneName) {
+        requireRoot();
+        TreeNode* zone = find(zoneName, (int)NodeKind::ZONE);
+        if (!zone) throw runtime_error("Zone '" + trim(zoneName) + "' not found.");
+        for (TreeNode* t = zone->firstChild; t; t = t->nextSibling)
+            if (t->occupied)
+                throw runtime_error("Zone '" + zone->name + "' still has occupied table " + t->name + ".");
+        string name = zone->name;
+        root->removeChild(zone);
+        freeSubtree(zone);              
+        return name;
+    }
+
+    string deleteTable(const string& tableId) {
+        requireRoot();
+        TreeNode* table = find(tableId, (int)NodeKind::TABLE);
+        if (!table) throw runtime_error("Table '" + trim(tableId) + "' not found.");
+        if (table->occupied) throw runtime_error("Table '" + table->name + "' is occupied. Free it first.");
+        string name = table->name;
+        table->parent->removeChild(table);
+        delete table;
+        return name;
+    }
+
+    void render() const {
+        if (!root) { cout << "(tree not created yet)\n"; return; }
+        cout << root->label() << "\n";
+        renderRec(root, "");
+    }
+};
+
+
+
+struct QueueNode {
+    string code;        
+    string name;
+    int partySize;
+    bool priority;      
+    QueueNode* next;
+
+    QueueNode(const string& c, const string& n, int p, bool pr)
+        : code(c), name(n), partySize(p), priority(pr), next(nullptr) {}
+
+    string info() const {
+        return code + " | " + name + " | " + to_string(partySize) + " people" +
+               (priority ? " [PRIORITY]" : "");
+    }
+};
+
+class CustomerQueue {
+    QueueNode* head = nullptr;
+    QueueNode* tail = nullptr;
+    int size = 0;
+    int counter = 0;
+
+    void clear() {
+        while (head) { QueueNode* n = head->next; delete head; head = n; }
+        tail = nullptr;
+        size = 0;
+    }
+
+    string nextCode() {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "Q%03d", ++counter);
+        return string(buf);
+    }
+
+public:
+    CustomerQueue() { create(); }
+    CustomerQueue(const CustomerQueue&) = delete;
+    CustomerQueue& operator=(const CustomerQueue&) = delete;
+    ~CustomerQueue() { clear(); }
+
+    void create() { clear(); counter = 0; }
+
+    bool isEmpty() const { return head == nullptr; }
+    int getSize() const { return size; }
+    QueueNode* peek() const { return head; }
+
+    QueueNode* enqueue(const string& rawName, int partySize, bool priority) {
+        string name = trim(rawName);
+        if (name.empty()) throw runtime_error("Customer name must not be empty.");
+        if (partySize <= 0) throw runtime_error("Party size must be greater than 0.");
+        QueueNode* node = new QueueNode(nextCode(), name, partySize, priority);
+
+        if (!priority || !head) {
+            if (!head) head = tail = node;
+            else { tail->next = node; tail = node; }
+        } else if (!head->priority) {
+            node->next = head;          
+            head = node;
+        } else {
+            QueueNode* cur = head;      
+            while (cur->next && cur->next->priority) cur = cur->next;
+            node->next = cur->next;
+            cur->next = node;
+            if (!node->next) tail = node;
+        }
+        size++;
+        return node;
+    }
+
+    int search(const string& rawCode, QueueNode** outNode) const {
+        string code = toUpper(trim(rawCode));
+        int pos = 1;
+        for (QueueNode* cur = head; cur; cur = cur->next, pos++) {
+            if (cur->code == code) { if (outNode) *outNode = cur; return pos; }
+        }
+        if (outNode) *outNode = nullptr;
+        return 0;
+    }
+
+    QueueNode dequeue() {
+        if (!head) throw runtime_error("The queue is empty.");
+        QueueNode* n = head;
+        head = n->next;
+        if (!head) tail = nullptr;
+        QueueNode copy = *n;
+        copy.next = nullptr;
+        delete n;
+        size--;
+        return copy;
+    }
+
+    QueueNode remove(const string& rawCode) {
+        string code = toUpper(trim(rawCode));
+        QueueNode* prev = nullptr;
+        for (QueueNode* cur = head; cur; prev = cur, cur = cur->next) {
+            if (cur->code == code) {
+                if (!prev) head = cur->next;
+                else prev->next = cur->next;
+                if (cur == tail) tail = prev;
+                QueueNode copy = *cur;
+                copy.next = nullptr;
+                delete cur;
+                size--;
+                return copy;
+            }
+        }
+        throw runtime_error("Queue code '" + code + "' not found.");
+    }
+
+    void render() const {
+        if (!head) { cout << "(queue is empty)\n"; return; }
+        int pos = 1;
+        for (QueueNode* cur = head; cur; cur = cur->next, pos++)
+            cout << "  " << pos << ". " << cur->info() << "\n";
+        cout << "  HEAD -> ";
+        for (QueueNode* cur = head; cur; cur = cur->next) cout << cur->code << " -> ";
+        cout << "NULL\n";
+    }
+};
+
+
+class CafeSystem {
+public:
+    CafeTree tree;
+    CustomerQueue queue;
+
+    void callNext() {
+        QueueNode* head = queue.peek();
+        if (!head) throw runtime_error("No customers waiting.");
+        TreeNode* table = tree.bestTableFor(head->partySize);
+        if (!table)
+            throw runtime_error("No available table for " + to_string(head->partySize) +
+                                " people (" + head->code + "). Customer keeps waiting.");
+        QueueNode c = queue.dequeue();
+        table->occupied = true;
+        table->customer = c.code;
+        cout << "  [CALL] Calling " << c.code << " - " << c.name << " (" << c.partySize << " people)\n";
+        cout << "  [OK] Please go to table " << table->name << ", zone " << table->parent->name
+             << " (" << table->seats << " seats)\n";
+    }
+
+    void freeTable(const string& tableId) {
+        TreeNode* t = tree.find(tableId, (int)NodeKind::TABLE);
+        if (!t) throw runtime_error("Table '" + trim(tableId) + "' not found.");
+        if (!t->occupied) throw runtime_error("Table '" + t->name + "' is already available.");
+        t->occupied = false;
+        t->customer = "";
+        cout << "  [OK] Table " << t->name << " is available again\n";
+    }
+
+    void loadSample() {
+        tree.create("Lily Cafe");
+        tree.insertTable("Indoor", "A1", 2);
+        tree.insertTable("Indoor", "A2", 4);
+        tree.insertTable("Indoor", "A3", 6);
+        tree.insertTable("Outdoor", "B1", 2);
+        tree.insertTable("Outdoor", "B2", 4);
+        queue.create();
+        queue.enqueue("Kiwi", 2, false);
+        queue.enqueue("Khaowmai", 4, false);
+        queue.enqueue("Kavin", 3, true);
+        queue.enqueue("Knight", 5, false);
+    }
+};
+
+//TEXT MENU
+
+static const char* MENU =
+"\n================ Cafe Queue and Table Zone Management System ================\n"
+" [Tree - Zones/Tables]               [Linked List - Customer Queue]\n"
+"  1. Create cafe + main zones         9. Create empty queue\n"
+"  2. Insert new zone                 10. Insert customer (normal)\n"
+"  3. Insert new table                11. Insert priority customer\n"
+"  4. Search zone / table             12. Search by queue code\n"
+"  5. Search available tables         13. Delete head (seated)\n"
+"  6. Delete zone                     14. Delete by code (cancelled)\n"
+"  7. Delete table                    15. Show queue\n"
+"  8. Show zone/table tree\n"
+" [Integration]\n"
+" 16. Call next customer -> auto assign table\n"
+" 17. Free a table (customer left)\n"
+" 18. Load sample data for demo\n"
+"  0. Exit\n"
+"============================================================================\n";
+
+struct InputEnded {};
+
+static string ask(const string& prompt) {
+    cout << prompt << flush;
+    string line;
+    if (!getline(cin, line)) throw InputEnded{};
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    return line;
+}
+
+static bool askInt(const string& prompt, int& out, bool allowBlank = false) {
+    while (true) {
+        string s = trim(ask(prompt));
+        if (allowBlank && s.empty()) return false;
+        try {
+            size_t used = 0;
+            int v = stoi(s, &used);
+            if (used == s.size()) { out = v; return true; }
+        } catch (const exception&) {}
+        cout << "  [!] Please enter a whole number.\n";
+    }
+}
+
+static void run() {
+    CafeSystem sys;
+    CafeTree& tree = sys.tree;
+    CustomerQueue& queue = sys.queue;
+    cout << "Welcome to the Cafe Queue and Table Zone Management System\n";
+    try {
+        while (true) {
+            cout << MENU;
+            string choice = trim(ask("Choose a menu option: "));
+            try {
+                if (choice == "0") {
+                    cout << "Goodbye!\n";
+                    break;
+                } else if (choice == "1") {
+                    string name = trim(ask("Cafe name (blank = My Cafe): "));
+                    if (name.empty()) name = "My Cafe";
+                    tree.create(name);
+                    cout << "  [OK] Created cafe '" << name << "' with zones Indoor and Outdoor\n";
+                    tree.render();
+                } else if (choice == "2") {
+                    TreeNode* z = tree.insertZone(ask("New zone name: "));
+                    cout << "  [OK] Added zone " << z->name << "\n";
+                } else if (choice == "3") {
+                    string zone = ask("Zone name: ");
+                    string tid = ask("Table id: ");
+                    int seats = 0;
+                    askInt("Number of seats: ", seats);
+                    TreeNode* t = tree.insertTable(zone, tid, seats);
+                    cout << "  [OK] Added table " << t->name << " (" << t->seats
+                         << " seats) to zone " << t->parent->name << "\n";
+                } else if (choice == "4") {
+                    TreeNode* n = tree.find(ask("Zone name or table id: "));
+                    if (!n) cout << "  [X] Not found\n";
+                    else {
+                        cout << "  [OK] Found: " << n->label() << "\n";
+                        if (n->parent) cout << "    located under: " << n->parent->label() << "\n";
+                    }
+                } else if (choice == "5") {
+                    int seats = 1;
+                    if (!askInt("Minimum seats (blank = any): ", seats, true)) seats = 1;
+                    string zone = trim(ask("Zone (blank = all zones): "));
+                    ResultList res = tree.searchAvailable(seats, zone);
+                    if (res.size == 0) cout << "  [X] No available tables match\n";
+                    else {
+                        cout << "  Available tables (" << res.size << "):\n";
+                        for (ResultNode* r = res.head; r; r = r->next)
+                            cout << "   - " << r->data->label() << " in zone " << r->data->parent->name << "\n";
+                    }
+                } else if (choice == "6") {
+                    string name = tree.deleteZone(ask("Zone name to delete: "));
+                    cout << "  [OK] Deleted zone " << name << " and all its tables\n";
+                } else if (choice == "7") {
+                    string name = tree.deleteTable(ask("Table id to delete: "));
+                    cout << "  [OK] Deleted table " << name << "\n";
+                } else if (choice == "8") {
+                    tree.render();
+                } else if (choice == "9") {
+                    queue.create();
+                    cout << "  [OK] Created an empty queue\n";
+                } else if (choice == "10" || choice == "11") {
+                    string name = ask("Customer name: ");
+                    int n = 0;
+                    askInt("Party size: ", n);
+                    QueueNode* node = queue.enqueue(name, n, choice == "11");
+                    int pos = queue.search(node->code, nullptr);
+                    cout << "  [OK] Queued: " << node->info() << "  (position " << pos << ")\n";
+                } else if (choice == "12") {
+                    QueueNode* node = nullptr;
+                    int pos = queue.search(ask("Queue code (e.g. Q001): "), &node);
+                    if (!node) cout << "  [X] Queue code not found\n";
+                    else {
+                        cout << "  [OK] Position " << pos << " of " << queue.getSize() << ": " << node->info() << "\n";
+                        cout << "    people ahead: " << pos - 1 << "\n";
+                    }
+                } else if (choice == "13") {
+                    QueueNode n = queue.dequeue();
+                    cout << "  [OK] Removed head of queue: " << n.info() << "\n";
+                } else if (choice == "14") {
+                    QueueNode n = queue.remove(ask("Queue code to cancel: "));
+                    cout << "  [OK] Cancelled: " << n.info() << "\n";
+                } else if (choice == "15") {
+                    cout << "  Waiting queue (" << queue.getSize() << "):\n";
+                    queue.render();
+                } else if (choice == "16") {
+                    sys.callNext();
+                } else if (choice == "17") {
+                    sys.freeTable(ask("Table id to free: "));
+                } else if (choice == "18") {
+                    sys.loadSample();
+                    cout << "  [OK] Sample data loaded\n";
+                    tree.render();
+                    queue.render();
+                } else {
+                    cout << "  [!] Invalid option. Please choose 0-18.\n";
+                }
+            } catch (const runtime_error& e) {
+                cout << "  [X] " << e.what() << "\n";
+            }
+        }
+    } catch (const InputEnded&) {
+        cout << "\n(input ended) Goodbye!\n";
+    }
+}
+
+int main() {
+    run();
+    return 0;
+}
